@@ -2,15 +2,56 @@ package mapreduce
 
 import (
 	"hash/fnv"
+	"io/ioutil"
+	"fmt"
+	"encoding/json"
+	"os"
 )
 
 func doMap(
 	jobName string, // the name of the MapReduce job
-	mapTask int, // which map task this is
+	mapTask int,    // which map task this is
 	inFile string,
 	nReduce int, // the number of reduce task that will be run ("R" in the paper)
 	mapF func(filename string, contents string) []KeyValue,
 ) {
+	contents, err := ioutil.ReadFile(inFile)
+	if err != nil {
+		fmt.Println("read error in map.")
+		return
+	}
+
+	fileArray := make([]*os.File, nReduce)
+	fileEncoderArray := make([]*json.Encoder, nReduce)
+
+	for i := 0; i < nReduce; i++ {
+		filename := reduceName(jobName, mapTask, i)
+		file, err := os.Create(filename)
+		if err != nil {
+			fmt.Println("open error in map.")
+			break
+		}
+		fileEncoderArray[i] = json.NewEncoder(file)
+		fileArray[i] = file
+	}
+
+	var immKV = mapF(inFile, string(contents))
+	for _, kv := range immKV {
+		var r = ihash(kv.Key) % nReduce
+		err := fileEncoderArray[r].Encode(&kv)
+		if err != nil {
+			fmt.Println("write error in map.")
+			break
+		}
+	}
+
+	for _, f := range fileArray {
+		f.Close()
+	}
+
+	// get the mapF output into nReduce intermediate files
+	// -- hash the key and write the K/V to corresponding file
+
 	//
 	// doMap manages one map task: it should read one of the input files
 	// (inFile), call the user-defined map function (mapF) for that file's
