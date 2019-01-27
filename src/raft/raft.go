@@ -81,6 +81,7 @@ type Raft struct {
 
 	chanHeartbeat chan bool
 	chanGrantVote chan bool
+	chanLeader    chan bool
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -225,6 +226,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if ok {
+		if reply.term > rf.currentTerm {
+			rf.currentTerm = reply.term
+			rf.state = STATE_FOLLOWER
+			rf.votedFor = -1
+		}
+		if reply.voteGranted {
+			rf.voteCounter++
+			if rf.state == STATE_CANDIDATE && rf.voteCounter > len(rf.peers)/2 {
+				rf.chanLeader <- true
+			}
+		}
+	}
+
 	return ok
 }
 
@@ -280,6 +298,29 @@ func (rf *Raft) Kill() {
 // Make() must return quickly, so it should start goroutines
 // for any long-running work.
 //
+
+func (rf *Raft) broadcastAppendEntries() {
+
+}
+
+func (rf *Raft) broadcastRequestVote() {
+	var voteArgs RequestVoteArgs
+	rf.mu.Lock()
+	voteArgs.candidateId = rf.me
+	voteArgs.term = rf.currentTerm
+	//voteArgs.lastLogIndex =
+	//voteArgs.lastLogTerm =
+	rf.mu.Unlock()
+	for peer := range rf.peers {
+		if peer != rf.me && rf.state == STATE_CANDIDATE {
+			go func(peer int) {
+				var reply RequestVoteReply
+				rf.sendRequestVote(peer, &voteArgs, &reply)
+			}(peer)
+		}
+	}
+}
+
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
@@ -292,11 +333,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.logs = append(rf.logs, LogEntry{logTerm: 0})
 	rf.chanHeartbeat = make(chan bool, 100)
 	rf.chanGrantVote = make(chan bool, 100)
+	rf.chanLeader = make(chan bool, 100)
 	//commitIndex int
 	//lastApplied int
 	//nextIndex  []int
 	//matchIndex []int
-
 	// Your initialization code here (2A, 2B, 2C).
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -317,7 +358,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				rf.votedFor = rf.me
 				rf.voteCounter = 1
 				rf.mu.Unlock()
-				// todo: broadcast voteRequest
+				go rf.broadcastRequestVote()
+				select {
+				case <-time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
+				case <-rf.chanHeartbeat:
+					rf.state = STATE_FOLLOWER
+				case rf.chanLeader:
+					rf.mu.Lock()
+					rf.state = STATE_LEADER
+					rf.mu.Unlock()
+				}
 			case STATE_LEADER:
 				// todo: broadcast heartbeat
 				time.Sleep(50 * time.Millisecond)
