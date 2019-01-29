@@ -250,7 +250,43 @@ func (rf *Raft) AppendEntries(server int, args *AppendEntriesArgs, reply *Append
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	// todo: appendEntries
+	reply.success = false
+
+	if args.term < rf.currentTerm {
+		reply.term = rf.currentTerm
+		return
+	}
+	rf.chanHeartbeat <- true
+	if args.term > rf.currentTerm {
+		rf.currentTerm = args.term
+		rf.state = STATE_FOLLOWER
+		//rf.votedFor = -1
+	}
+	reply.term = args.term
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if ok {
+		if rf.state != STATE_LEADER {
+			return ok
+		}
+		if args.term != rf.currentTerm {
+			return ok
+		}
+
+		if reply.term > rf.currentTerm {
+			rf.currentTerm = reply.term
+			rf.state = STATE_FOLLOWER
+			rf.votedFor = -1
+			rf.persist()
+			return ok
+		}
+	}
+	return ok
 }
 
 //
@@ -300,7 +336,19 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) broadcastAppendEntries() {
-
+	var args AppendEntriesArgs
+	rf.mu.Lock()
+	args.term = rf.currentTerm
+	args.leaderId = rf.me
+	rf.mu.Unlock()
+	for peer := range rf.peers {
+		if peer != rf.me && rf.state == STATE_LEADER {
+			go func(peer int) {
+				var reply AppendEntriesReply
+				rf.sendAppendEntries(peer, &args, &reply)
+			}(peer)
+		}
+	}
 }
 
 func (rf *Raft) broadcastRequestVote() {
@@ -369,7 +417,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.mu.Unlock()
 				}
 			case STATE_LEADER:
-				// todo: broadcast heartbeat
+				rf.broadcastAppendEntries()
 				time.Sleep(50 * time.Millisecond)
 			}
 		}
