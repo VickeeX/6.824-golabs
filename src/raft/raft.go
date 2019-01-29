@@ -7,10 +7,10 @@ package raft
 //
 // rf = Make(...)
 //   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
+// rf.Start(command interface{}) (index, Term, isleader)
 //   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
+// rf.GetState() (Term, isLeader)
+//   ask a Raft for its current Term, and whether it thinks it is leader
 // ApplyMsg
 //   each time a new entry is committed to the log, each Raft peer
 //   should send an ApplyMsg to the service (or tester)
@@ -52,9 +52,9 @@ type ApplyMsg struct {
 }
 
 type LogEntry struct {
-	logIndex   int
-	logCommand interface{}
-	logTerm    int
+	LogIndex   int
+	LogCommand interface{}
+	LogTerm    int
 }
 
 //
@@ -91,10 +91,10 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	//var term int
+	//var Term int
 	//var isleader bool
 	// Your code here (2A).
-	//return term, isleader
+	//return Term, isleader
 	return rf.currentTerm, rf.state == STATE_LEADER
 }
 
@@ -142,25 +142,25 @@ func (rf *Raft) readPersist(data []byte) {
 //
 
 type AppendEntriesArgs struct {
-	term              int
-	leaderId          int
-	prevLogIndex      int
-	prevLogTerm       int
-	entries           []LogEntry
-	leaderCommitIndex int
+	Term              int
+	LeaderId          int
+	PrevLogIndex      int
+	PrevLogTerm       int
+	Entries           []LogEntry
+	LeaderCommitIndex int
 }
 
 type AppendEntriesReply struct {
-	term    int
-	success bool
+	Term    int
+	Success bool
 }
 
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	term         int
-	candidateId  int
-	lastLogIndex int
-	lastLogTerm  int
+	Term         int
+	CandidateId  int
+	LastLogIndex int
+	LastLogTerm  int
 }
 
 //
@@ -169,30 +169,30 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here (2A).
-	term        int
-	voteGranted bool // true means vote
+	Term        int
+	VoteGranted bool // true means vote
 }
 
 //
 // example RequestVote RPC handler.
 //
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	reply.voteGranted = false
-	if args.term < rf.currentTerm { // vote for no
-		reply.term = rf.currentTerm
+	reply.VoteGranted = false
+	if args.Term < rf.currentTerm { // vote for no
+		reply.Term = rf.currentTerm
 		return
 	}
-	if args.term > rf.currentTerm { // vote for yes
-		rf.currentTerm = args.term
+	if args.Term > rf.currentTerm { // vote for yes
+		rf.currentTerm = args.Term
 		rf.state = STATE_FOLLOWER
-		rf.votedFor = args.candidateId
-		reply.voteGranted = true
+		rf.votedFor = args.CandidateId
+		reply.VoteGranted = true
 	}
-	reply.term = rf.currentTerm
+	reply.Term = rf.currentTerm
 }
 
 //
@@ -224,18 +224,18 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
 	if ok {
-		if reply.term > rf.currentTerm {
-			rf.currentTerm = reply.term
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
 			rf.state = STATE_FOLLOWER
 			rf.votedFor = -1
 		}
-		if reply.voteGranted {
+		if reply.VoteGranted {
 			rf.voteCounter++
 			if rf.state == STATE_CANDIDATE && rf.voteCounter > len(rf.peers)/2 {
 				rf.chanLeader <- true
@@ -246,26 +246,26 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
-func (rf *Raft) AppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) {
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	reply.success = false
+	reply.Success = false
 
-	if args.term < rf.currentTerm {
-		reply.term = rf.currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
 		return
 	}
 	rf.chanHeartbeat <- true
-	if args.term > rf.currentTerm {
-		rf.currentTerm = args.term
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
 		rf.state = STATE_FOLLOWER
 		//rf.votedFor = -1
 	}
-	reply.term = args.term
+	reply.Term = args.Term
 }
 
-func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -274,12 +274,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 		if rf.state != STATE_LEADER {
 			return ok
 		}
-		if args.term != rf.currentTerm {
+		if args.Term != rf.currentTerm {
 			return ok
 		}
 
-		if reply.term > rf.currentTerm {
-			rf.currentTerm = reply.term
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
 			rf.state = STATE_FOLLOWER
 			rf.votedFor = -1
 			rf.persist()
@@ -300,7 +300,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 //
 // the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
-// term. the third return value is true if this server believes it is
+// Term. the third return value is true if this server believes it is
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
@@ -338,14 +338,14 @@ func (rf *Raft) Kill() {
 func (rf *Raft) broadcastAppendEntries() {
 	var args AppendEntriesArgs
 	rf.mu.Lock()
-	args.term = rf.currentTerm
-	args.leaderId = rf.me
+	args.Term = rf.currentTerm
+	args.LeaderId = rf.me
 	rf.mu.Unlock()
 	for peer := range rf.peers {
 		if peer != rf.me && rf.state == STATE_LEADER {
 			go func(peer int) {
 				var reply AppendEntriesReply
-				rf.sendAppendEntries(peer, &args, &reply)
+				rf.sendAppendEntries(peer, args, &reply)
 			}(peer)
 		}
 	}
@@ -354,8 +354,8 @@ func (rf *Raft) broadcastAppendEntries() {
 func (rf *Raft) broadcastRequestVote() {
 	var voteArgs RequestVoteArgs
 	rf.mu.Lock()
-	voteArgs.candidateId = rf.me
-	voteArgs.term = rf.currentTerm
+	voteArgs.CandidateId = rf.me
+	voteArgs.Term = rf.currentTerm
 	//voteArgs.lastLogIndex =
 	//voteArgs.lastLogTerm =
 	rf.mu.Unlock()
@@ -363,7 +363,7 @@ func (rf *Raft) broadcastRequestVote() {
 		if peer != rf.me && rf.state == STATE_CANDIDATE {
 			go func(peer int) {
 				var reply RequestVoteReply
-				rf.sendRequestVote(peer, &voteArgs, &reply)
+				rf.sendRequestVote(peer, voteArgs, &reply)
 			}(peer)
 		}
 	}
@@ -378,7 +378,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = STATE_FOLLOWER
 	rf.currentTerm = 0
 	rf.votedFor = -1
-	rf.logs = append(rf.logs, LogEntry{logTerm: 0})
+	rf.logs = append(rf.logs, LogEntry{LogTerm: 0})
 	rf.chanHeartbeat = make(chan bool, 100)
 	rf.chanGrantVote = make(chan bool, 100)
 	rf.chanLeader = make(chan bool, 100)
@@ -397,7 +397,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				select {
 				case <-rf.chanHeartbeat: // no timeout, continue
 				case <-rf.chanGrantVote: // vote for some candidate, continue
-				case time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
+				case <-time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
 					rf.state = STATE_CANDIDATE
 				}
 			case STATE_CANDIDATE:
@@ -411,7 +411,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 				case <-time.After(time.Duration(rand.Int63()%333+550) * time.Millisecond):
 				case <-rf.chanHeartbeat:
 					rf.state = STATE_FOLLOWER
-				case rf.chanLeader:
+				case <-rf.chanLeader:
 					rf.mu.Lock()
 					rf.state = STATE_LEADER
 					rf.mu.Unlock()
