@@ -72,7 +72,7 @@ type Raft struct {
 	votedFor    int        // the server's id voted for
 	voteCounter int        // count the votes
 	logs        []LogEntry // log entries
-	commitIndex int        // index of highest entry konwn to be committed
+	commitIndex int        // index of highest entry known to be committed
 	lastApplied int        // index of highest entry applied to state machine
 
 	// states that leader maintains
@@ -82,6 +82,8 @@ type Raft struct {
 	chanHeartbeat chan bool // keep track of each server's healthy
 	chanGrantVote chan bool // record votes during an election
 	chanLeader    chan bool // if any server elected to be a leader
+	chanCommit    chan bool // if any server commit the entry
+	chanApply     chan ApplyMsg
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
@@ -193,7 +195,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm { // vote for yes
 		rf.currentTerm = args.Term
 		rf.state = STATE_FOLLOWER
-		rf.votedFor = args.CandidateId
+		rf.votedFor = -1
 	}
 	reply.Term = rf.currentTerm
 
@@ -206,10 +208,11 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	if args.LastLogTerm == term && args.LastLogIndex >= index {
 		latest = true
 	}
-	if rf.votedFor == args.CandidateId && latest {
+	if (rf.votedFor == -1 || rf.votedFor==args.CandidateId) && latest {
 		rf.chanGrantVote <- true
 		rf.state = STATE_FOLLOWER
 		reply.VoteGranted = true
+		rf.votedFor = args.CandidateId
 	}
 
 }
@@ -273,7 +276,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	if args.Term < rf.currentTerm { // stale leader
 		reply.Term = rf.currentTerm
-		reply.NextIndex = rf.getLastIndex()
+		reply.NextIndex = rf.getLastIndex() + 1
 		return
 	}
 
@@ -292,29 +295,34 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 	baseIndex := rf.logs[0].LogIndex // may not start from 0
 	if args.PrevLogIndex > baseIndex {
-		if args.PrevLogTerm != rf.logs[args.PrevLogIndex-baseIndex].LogTerm { // miss some entries
-			for i := args.PrevLogIndex - baseIndex - 1; i >= 0; i-- {
-				if rf.logs[i].LogTerm != rf.logs[args.PrevLogIndex-baseIndex].LogTerm {
-					reply.NextIndex = i + baseIndex + 1
+		term := rf.logs[args.PrevLogIndex-baseIndex].LogTerm
+		if args.PrevLogTerm != term {
+			for i := args.PrevLogIndex - 1 ; i >= baseIndex; i-- {
+				if rf.logs[i-baseIndex].LogTerm != term {
+					reply.NextIndex = i + 1
 					break
 				}
 			}
 			return
 		}
+	}
+	if args.PrevLogIndex>=baseIndex{
 		rf.logs = rf.logs[:args.PrevLogIndex+1-baseIndex]
 		rf.logs = append(rf.logs, args.Entries...) // append new entries
 		reply.Success = true
 		reply.NextIndex = rf.getLastIndex() + 1
-
-		if args.LeaderCommitIndex > rf.commitIndex {
-			if args.LeaderCommitIndex < rf.getLastIndex() {
-				rf.commitIndex = args.LeaderCommitIndex
-			} else {
-				rf.commitIndex = rf.getLastIndex()
-			}
-			//rf.commitIndex = math.MinInt64(args.LeaderCommitIndex, rf.getLastIndex())
-		}
 	}
+
+	if args.LeaderCommitIndex > rf.commitIndex {
+		if args.LeaderCommitIndex > rf.getLastIndex() {
+			rf.commitIndex = rf.getLastIndex()
+		} else {
+			rf.commitIndex = args.LeaderCommitIndex
+		}
+		//rf.commitIndex = math.MinInt64(args.LeaderCommitIndex, rf.getLastIndex())
+		rf.chanCommit <- true
+	}
+	return
 }
 
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -341,9 +349,9 @@ func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *App
 				// update the nextIndex and matchIndex of "server"
 				rf.nextIndex[server] = args.Entries[len(args.Entries)-1].LogIndex + 1
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
-			} else {
-				rf.nextIndex[server] = reply.NextIndex
 			}
+		} else {
+			rf.nextIndex[server] = reply.NextIndex
 		}
 	}
 	return ok
@@ -400,21 +408,49 @@ func (rf *Raft) Kill() {
 //
 
 func (rf *Raft) broadcastAppendEntries() {
-	var args AppendEntriesArgs
 	rf.mu.Lock()
-	args.Term = rf.currentTerm
-	args.LeaderId = rf.me
-	rf.mu.Unlock()
-	for peer := range rf.peers {
-		if peer != rf.me && rf.state == STATE_LEADER {
-			go func(peer int) {
-				var reply AppendEntriesReply
-				rf.sendAppendEntries(peer, args, &reply)
-			}(peer)
+	defer rf.mu.Unlock()
+
+	baseIndex := rf.logs[0].LogIndex
+	last := rf.getLastIndex()
+	newCommitIndex := rf.commitIndex
+
+	// find next entry to be committed
+	for i := rf.commitIndex + 1; i <= last; i++ {
+		committed := 1
+		for peer := range rf.peers {
+			if peer != rf.me && rf.matchIndex[peer] >= i && rf.logs[i-baseIndex].LogTerm == rf.currentTerm {
+				committed++
+			}
+		}
+		if committed*2 > len(rf.peers) { // most server has stored the entry -- committed
+			newCommitIndex = i
 		}
 	}
 
-	// Todo: complete
+	if newCommitIndex != rf.commitIndex { // to be committed
+		rf.commitIndex = last
+		rf.chanCommit <- true
+	}
+
+	for peer := range rf.peers {
+		if peer != rf.me && rf.state == STATE_LEADER {
+			if rf.nextIndex[peer] > baseIndex { // new entries needed from leader to followers
+				var args AppendEntriesArgs
+				args.Term = rf.currentTerm
+				args.LeaderId = rf.me
+				args.PrevLogIndex = rf.nextIndex[peer] - 1
+				args.PrevLogTerm = rf.logs[args.PrevLogIndex-baseIndex].LogTerm
+				args.Entries = make([]LogEntry, len(rf.logs[args.PrevLogIndex-baseIndex+1:]))
+				copy(args.Entries, rf.logs[args.PrevLogIndex-baseIndex+1:])
+				args.LeaderCommitIndex = rf.commitIndex
+				go func(peer int) {
+					var reply AppendEntriesReply
+					rf.sendAppendEntries(peer, args, &reply)
+				}(peer)
+			}
+		}
+	}
 }
 
 func (rf *Raft) broadcastRequestVote() {
@@ -437,6 +473,8 @@ func (rf *Raft) broadcastRequestVote() {
 
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	// Your initialization code here (2A, 2B, 2C).
+	// initialize from state persisted before a crash
 	rf := &Raft{}
 	rf.peers = peers
 	rf.persister = persister
@@ -448,8 +486,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.chanHeartbeat = make(chan bool, 100)
 	rf.chanGrantVote = make(chan bool, 100)
 	rf.chanLeader = make(chan bool, 100)
-	// Your initialization code here (2A, 2B, 2C).
-	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	go func() {
@@ -479,7 +515,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 					rf.nextIndex = make([]int, len(rf.peers))
 					rf.matchIndex = make([]int, len(rf.peers))
 					for i := range rf.peers {
-						rf.nextIndex[i] = rf.logs[len(rf.logs)-1].LogIndex + 1
+						rf.nextIndex[i] = rf.getLastIndex() + 1
 						rf.matchIndex[i] = 0
 					}
 					rf.mu.Unlock()
@@ -491,7 +527,21 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		}
 	}()
 
-	// Todo: update rf's commit state
+	go func() {
+		for {
+			select {
+			case <-rf.chanCommit: // entry to commit
+				rf.mu.Lock()
+				baseIndex := rf.logs[0].LogIndex
+				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+					msg := ApplyMsg{CommandIndex: i, Command: rf.logs[i-baseIndex].LogCommand}
+					applyCh <- msg
+					rf.lastApplied = i
+				}
+				rf.mu.Unlock()
+			}
+		}
+	}()
 
 	return rf
 }
